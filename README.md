@@ -1,4 +1,4 @@
-# RingQ Fax — Complete Architecture & Setup Guide
+# RingQ eFax — Complete Architecture & Setup Guide
 
 Multi-tenant eFax solution built on RingQ's existing FusionPBX/RingQ platform. This document covers the full architecture, server setup, RingQ-side configuration, dashboard deployment, API reference, and every real issue encountered and fixed during development.
 
