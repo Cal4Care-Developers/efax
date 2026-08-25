@@ -1,0 +1,16 @@
+[Unit]
+Description=RingQ Fax API (multi-tenant)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/fax-engine
+EnvironmentFile=/var/www/fax-engine/.env
+ExecStart=/var/www/fax-engine/venv/bin/uvicorn api_server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

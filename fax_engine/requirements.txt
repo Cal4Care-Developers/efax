@@ -1,0 +1,11 @@
+# Used by fax_worker.py to talk to FreeSWITCH
+greenswitch>=0.0.17
+gevent>=23.9.0
+
+# Used by db.py to talk to the shared RingQ Postgres database
+psycopg2-binary>=2.9.9
+
+# Used by api_server.py
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
