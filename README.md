@@ -1,6 +1,6 @@
 # RingQ eFax — Complete Architecture & Setup Guide
 
-Multi-tenant eFax solution built on RingQ's existing FusionPBX/RingQ platform. This document covers the full architecture, server setup, RingQ-side configuration, dashboard deployment, API reference, and every real issue encountered and fixed during development.
+Multi-tenant eFax solution built on RingQ's existing RingQ platform. This document covers the full architecture, server setup, RingQ-side configuration, dashboard deployment, API reference, and every real issue encountered and fixed during development.
 
 ---
 
@@ -12,7 +12,7 @@ Multi-tenant eFax solution built on RingQ's existing FusionPBX/RingQ platform. T
 4. [Backend Installation](#4-backend-installation)
 5. [Systemd Services](#5-systemd-services)
 6. [nginx Configuration](#6-nginx-configuration)
-7. [RingQ / FusionPBX-Side Configuration](#7-ringq--fusionpbx-side-configuration)
+7. [RingQ Configuration](#7-ringq--side-configuration)
 8. [Dashboard (Frontend) Setup](#8-dashboard-frontend-setup)
 9. [Database Schema](#9-database-schema)
 10. [API Reference](#10-api-reference)
@@ -54,7 +54,7 @@ Postgres (RingQ's own `ringq` database -- shared, not separate)
     - fax_jobs, fax_domain_settings (our tables)
     - q_tokens, q_dids, v_gateways, q_companies (RingQ's own tables, read-only to us)
 
-RingQ / FusionPBX
+RingQ
     - Dialplan entries per fax-enabled DID (see Section 7)
     - Gateways registered per SIP trunk (RingQ-managed)
 ```
@@ -70,12 +70,12 @@ RingQ / FusionPBX
 
 ## 2. Prerequisites
 
-- **FusionPBX/RingQ already running**, with RingQ's existing multi-tenant Postgres schema (`q_dids`, `v_gateways`, `q_tokens`, `q_companies`, `v_dialplans`, `v_dialplan_details`)
+- **RingQ already running**, with RingQ's existing multi-tenant Postgres schema (`q_dids`, `v_gateways`, `q_tokens`, `q_companies`, `v_dialplans`, `v_dialplan_details`)
 - **Python 3.11+** with `venv`
 - **Node.js 16+** and `npm` (for building the dashboard -- pin `vite@^4.5.5` if on Node 16, see Section 8)
 - **ghostscript** and **libtiff-tools** (PDF<->TIFF conversion)
 - **Postgres access** to the `ringq` database (credentials read automatically from `/etc/ringq/config.conf` -- see `config.py`)
-- **`mod_spandsp` loaded in RingQ** (`fs_cli -x "show modules" | grep -i sofia` and confirm `mod_spandsp` similarly -- most FusionPBX installs have this by default)
+- **`mod_spandsp` loaded in RingQ** (`fs_cli -x "show modules" | grep -i sofia` and confirm `mod_spandsp` similarly -- most RingQ installs have this by default)
 - Root/sudo access on the RingQ box for systemd, nginx, and dialplan changes
 
 ---
@@ -216,7 +216,7 @@ nginx -t && systemctl reload nginx
 
 ---
 
-## 7. RingQ / FusionPBX-Side Configuration
+## 7. RingQ Side Configuration
 
 ### 7.1 Understanding gateway resolution (context, no action needed)
 
@@ -229,11 +229,11 @@ JOIN v_gateways g ON g.gateway = d.sip_trunk_name AND g.domain_uuid = d.domain_u
 WHERE d.domain_uuid = %s AND d.did_number = %s
 ```
 
-**Critical gotcha**: the actual RingQ dial string must use `gateway_uuid`, **not** the friendly `gateway` name column. FusionPBX keys gateways by UUID internally (friendly names are only unique *within* one domain, not across the whole multi-tenant PBX -- two different customers could both name a trunk "main"). Confirmed directly: `fs_cli -x "sofia status gateway"` never shows the friendly name, only the UUID.
+**Critical gotcha**: the actual RingQ dial string must use `gateway_uuid`, **not** the friendly `gateway` name column. RingQ keys gateways by UUID internally (friendly names are only unique *within* one domain, not across the whole multi-tenant PBX -- two different customers could both name a trunk "main"). Confirmed directly: `fs_cli -x "sofia status gateway"` never shows the friendly name, only the UUID.
 
 ### 7.2 Outbound Rules -- required per number, separate from gateway assignment
 
-Even though our worker dials the gateway directly (bypassing FusionPBX's Outbound Route *dialplan matching* entirely), RingQ's own **Outbound Rules** feature appears to be a separate authorization layer gating which Caller IDs may originate calls on a trunk at all -- regardless of how the call was placed. Confirmed empirically: without a matching Outbound Rule, calls fail with total silence (`"Timed out waiting for initial communication"`); creating one with the correct Caller ID fixes it immediately.
+Even though our worker dials the gateway directly (bypassing RingQ's Outbound Route *dialplan matching* entirely), RingQ's own **Outbound Rules** feature appears to be a separate authorization layer gating which Caller IDs may originate calls on a trunk at all -- regardless of how the call was placed. Confirmed empirically: without a matching Outbound Rule, calls fail with total silence (`"Timed out waiting for initial communication"`); creating one with the correct Caller ID fixes it immediately.
 
 **For every new fax number: create an Outbound Rule in RingQ with that number set as the Caller ID**, in addition to its `q_dids` gateway assignment. This is not optional and not automatic.
 
