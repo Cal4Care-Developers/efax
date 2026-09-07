@@ -1,6 +1,6 @@
-# RingQ eFax — Complete Architecture & Setup Guide
+# RingQ Fax — Complete Architecture & Setup Guide
 
-Multi-tenant eFax solution built on RingQ's existing RingQ platform. This document covers the full architecture, server setup, RingQ-side configuration, dashboard deployment, API reference, and every real issue encountered and fixed during development.
+Multi-tenant eFax solution built on RingQ's existing FusionPBX/FreeSWITCH platform. This document covers the full architecture, server setup, RingQ-side configuration, dashboard deployment, API reference, and every real issue encountered and fixed during development.
 
 ---
 
@@ -12,7 +12,7 @@ Multi-tenant eFax solution built on RingQ's existing RingQ platform. This docume
 4. [Backend Installation](#4-backend-installation)
 5. [Systemd Services](#5-systemd-services)
 6. [nginx Configuration](#6-nginx-configuration)
-7. [RingQ Configuration](#7-ringq--side-configuration)
+7. [RingQ / FusionPBX-Side Configuration](#7-ringq--fusionpbx-side-configuration)
 8. [Dashboard (Frontend) Setup](#8-dashboard-frontend-setup)
 9. [Database Schema](#9-database-schema)
 10. [API Reference](#10-api-reference)
@@ -37,13 +37,13 @@ nginx (sgringq97.ringq.ai)
         already used everywhere else in the app
 
 api_server.py (FastAPI/uvicorn, port 8000)
-    - Pure HTTP + Postgres. No RingQ connection.
+    - Pure HTTP + Postgres. No FreeSWITCH connection.
     - Auth: validates token against RingQ's own q_tokens table
     - Reads/writes fax_jobs, fax_domain_settings
     - Resolves gateways live from RingQ's own q_dids + v_gateways
 
 fax_worker.py / fax_service.py (single persistent process)
-    - The ONLY process that talks to RingQ (via ESL)
+    - The ONLY process that talks to FreeSWITCH (via ESL)
     - Polls fax_jobs for queued outbound sends -> originates calls
     - Listens for CHANNEL_ANSWER / CHANNEL_HANGUP_COMPLETE
       to create and finalize inbound job records
@@ -54,7 +54,7 @@ Postgres (RingQ's own `ringq` database -- shared, not separate)
     - fax_jobs, fax_domain_settings (our tables)
     - q_tokens, q_dids, v_gateways, q_companies (RingQ's own tables, read-only to us)
 
-RingQ
+FreeSWITCH / FusionPBX
     - Dialplan entries per fax-enabled DID (see Section 7)
     - Gateways registered per SIP trunk (RingQ-managed)
 ```
@@ -70,13 +70,13 @@ RingQ
 
 ## 2. Prerequisites
 
-- **RingQ already running**, with RingQ's existing multi-tenant Postgres schema (`q_dids`, `v_gateways`, `q_tokens`, `q_companies`, `v_dialplans`, `v_dialplan_details`)
+- **FusionPBX/FreeSWITCH already running**, with RingQ's existing multi-tenant Postgres schema (`q_dids`, `v_gateways`, `q_tokens`, `q_companies`, `v_dialplans`, `v_dialplan_details`)
 - **Python 3.11+** with `venv`
 - **Node.js 16+** and `npm` (for building the dashboard -- pin `vite@^4.5.5` if on Node 16, see Section 8)
 - **ghostscript** and **libtiff-tools** (PDF<->TIFF conversion)
 - **Postgres access** to the `ringq` database (credentials read automatically from `/etc/ringq/config.conf` -- see `config.py`)
-- **`mod_spandsp` loaded in RingQ** (`fs_cli -x "show modules" | grep -i sofia` and confirm `mod_spandsp` similarly -- most RingQ installs have this by default)
-- Root/sudo access on the RingQ box for systemd, nginx, and dialplan changes
+- **`mod_spandsp` loaded in FreeSWITCH** (`fs_cli -x "show modules" | grep -i sofia` and confirm `mod_spandsp` similarly -- most FusionPBX installs have this by default)
+- Root/sudo access on the FreeSWITCH box for systemd, nginx, and dialplan changes
 
 ---
 
@@ -113,7 +113,7 @@ Copy the backend source files (`api_server.py`, `config.py`, `converters.py`, `d
 FS_ESL_HOST=127.0.0.1
 FS_ESL_PORT=8021
 # Read the real value from
-# /etc/RingQ/autoload_configs/event_socket.conf.xml
+# /etc/freeswitch/autoload_configs/event_socket.conf.xml
 FS_ESL_PASSWORD=ClueCon
 
 OUTBOUND_PDF_DIR=/var/spool/fax/outbound_pdf
@@ -124,9 +124,9 @@ INBOX_PDF_DIR=/var/spool/fax/inbox
 FAX_RESOLUTION=204x196
 
 # See Section 11 -- confirmed via direct testing that this
-# RingQ/mod_spandsp build has a T.38 bug (negotiates fine, never
+# FreeSWITCH/mod_spandsp build has a T.38 bug (negotiates fine, never
 # actually transfers data afterward). Leave false until a future
-# RingQ/libspandsp upgrade is tested from scratch.
+# FreeSWITCH/libspandsp upgrade is tested from scratch.
 FAX_ENABLE_T38=false
 
 WORKER_POLL_INTERVAL=1.5
@@ -159,8 +159,8 @@ WantedBy=multi-user.target
 **`/etc/systemd/system/ringq-fax-worker.service`**
 ```ini
 [Unit]
-Description=RingQ Fax Worker (RingQ ESL fax engine, multi-tenant)
-After=network.target RingQ.service
+Description=RingQ Fax Worker (FreeSWITCH ESL fax engine, multi-tenant)
+After=network.target freeswitch.service
 
 [Service]
 Type=simple
@@ -216,11 +216,11 @@ nginx -t && systemctl reload nginx
 
 ---
 
-## 7. RingQ Side Configuration
+## 7. RingQ / FusionPBX-Side Configuration
 
 ### 7.1 Understanding gateway resolution (context, no action needed)
 
-`db.py`'s `get_did_gateway()`/`list_domain_dids()` join RingQ's `q_dids` (which number belongs to which trunk, by friendly name) against `v_gateways` (that trunk's actual RingQ config) to resolve, per number, per request:
+`db.py`'s `get_did_gateway()`/`list_domain_dids()` join RingQ's `q_dids` (which number belongs to which trunk, by friendly name) against `v_gateways` (that trunk's actual FreeSWITCH config) to resolve, per number, per request:
 
 ```sql
 SELECT g.gateway, g.gateway_uuid, g.enabled
@@ -229,17 +229,17 @@ JOIN v_gateways g ON g.gateway = d.sip_trunk_name AND g.domain_uuid = d.domain_u
 WHERE d.domain_uuid = %s AND d.did_number = %s
 ```
 
-**Critical gotcha**: the actual RingQ dial string must use `gateway_uuid`, **not** the friendly `gateway` name column. RingQ keys gateways by UUID internally (friendly names are only unique *within* one domain, not across the whole multi-tenant PBX -- two different customers could both name a trunk "main"). Confirmed directly: `fs_cli -x "sofia status gateway"` never shows the friendly name, only the UUID.
+**Critical gotcha**: the actual FreeSWITCH dial string must use `gateway_uuid`, **not** the friendly `gateway` name column. FusionPBX keys gateways by UUID internally (friendly names are only unique *within* one domain, not across the whole multi-tenant PBX -- two different customers could both name a trunk "main"). Confirmed directly: `fs_cli -x "sofia status gateway"` never shows the friendly name, only the UUID.
 
 ### 7.2 Outbound Rules -- required per number, separate from gateway assignment
 
-Even though our worker dials the gateway directly (bypassing RingQ's Outbound Route *dialplan matching* entirely), RingQ's own **Outbound Rules** feature appears to be a separate authorization layer gating which Caller IDs may originate calls on a trunk at all -- regardless of how the call was placed. Confirmed empirically: without a matching Outbound Rule, calls fail with total silence (`"Timed out waiting for initial communication"`); creating one with the correct Caller ID fixes it immediately.
+Even though our worker dials the gateway directly (bypassing FusionPBX's Outbound Route *dialplan matching* entirely), RingQ's own **Outbound Rules** feature appears to be a separate authorization layer gating which Caller IDs may originate calls on a trunk at all -- regardless of how the call was placed. Confirmed empirically: without a matching Outbound Rule, calls fail with total silence (`"Timed out waiting for initial communication"`); creating one with the correct Caller ID fixes it immediately.
 
 **For every new fax number: create an Outbound Rule in RingQ with that number set as the Caller ID**, in addition to its `q_dids` gateway assignment. This is not optional and not automatic.
 
 ### 7.3 Inbound dialplan -- the proven template
 
-**Use a plain `dialplan_xml` text blob in `v_dialplans`, not `v_dialplan_details` rows.** The normalized-row approach was repeatedly unreliable in practice (edits silently failed to take effect even after `reloadxml` or a full RingQ restart); the direct XML text edit is what's actually proven reliable, consistently.
+**Use a plain `dialplan_xml` text blob in `v_dialplans`, not `v_dialplan_details` rows.** The normalized-row approach was repeatedly unreliable in practice (edits silently failed to take effect even after `reloadxml` or a full FreeSWITCH restart); the direct XML text edit is what's actually proven reliable, consistently.
 
 ```sql
 -- STEP 0: check for an existing row for this number first.
@@ -265,7 +265,7 @@ VALUES
         <action application="set" data="fax_direction=in"/>
         <action application="set" data="domain_uuid=<DOMAIN_UUID>"/>
         <action application="set" data="fax_verbose=true"/>
-        <action application="set" data="fax_enable_t38=false"/>
+        <action application="set" data="fax_enable_t38=true"/>
         <action application="set" data="fax_enable_t38_request=false"/>
         <action application="set" data="fax_enable_ecm=true"/>
         <action application="set" data="ignore_early_media=true"/>
@@ -304,6 +304,7 @@ Send a test fax, confirm the trace shows the correct `fax_enable_t38` and `domai
      ORDER BY dialplan_order;
    ```
    Disable whichever row isn't the one this system created.
+5. **The extension a fax DID is assigned to must have voicemail disabled.** Confirmed root cause on a separate RingQ instance: even with the DID's own dialplan entry correctly configured for fax, if the underlying extension has voicemail enabled, some call paths answer with the voicemail greeting/prompt flow before fax handling is ever reached — the call looks like it "isn't receiving" when really it's being swallowed by voicemail. Check this *before* assuming the dialplan entry itself is broken; a working, correctly-configured fax dialplan can still fail this way if the target extension's voicemail is on.
 
 ---
 
@@ -408,11 +409,11 @@ There are **two independent switches**, controlling two different directions, th
 - **Outbound**: T.38 negotiates successfully (confirmed via SDP trace -- real `image/t38`/UDPTL exchange), then `mod_spandsp` stalls indefinitely afterward -- no actual page data ever transfers. A UDPTL packet capture showed our side transmitting exactly 2 redundant indicator packets after negotiation, then going completely silent for the rest of the call while the far end kept retrying.
 - **Inbound, passive** (`fax_enable_t38=true`, `fax_enable_t38_request=false`): never even attempts negotiation against a real T.38-strict machine.
 - **Inbound, active** (`fax_enable_t38_request=true`, tested clean with a fresh dialplan entry, no caching ambiguity): still failed the same way.
-- **Root cause for the strict-machine case, confirmed via `sngrep` capture**: the far-end fax machine demands T.38 in the very first SDP answer and hangs up within milliseconds if it doesn't get it (`INVITE -> our audio-only 200 OK -> their BYE, 33ms later`). RingQ's standard model always answers audio-first and proposes T.38 via a *separate* re-INVITE afterward -- a hard architectural mismatch with this device's stricter expectation, not a settings problem.
+- **Root cause for the strict-machine case, confirmed via `sngrep` capture**: the far-end fax machine demands T.38 in the very first SDP answer and hangs up within milliseconds if it doesn't get it (`INVITE -> our audio-only 200 OK -> their BYE, 33ms later`). FreeSWITCH's standard model always answers audio-first and proposes T.38 via a *separate* re-INVITE afterward -- a hard architectural mismatch with this device's stricter expectation, not a settings problem.
 
 **Practical requirement for any customer's fax machine**: T.38 must be disabled at the device itself for reliable operation on this platform. This needs to be documented in customer onboarding, not just here.
 
-**Revisit only after a RingQ/libspandsp upgrade**, and re-test from scratch -- don't assume a version bump fixes it without direct verification.
+**Revisit only after a FreeSWITCH/libspandsp upgrade**, and re-test from scratch -- don't assume a version bump fixes it without direct verification.
 
 ---
 
@@ -426,16 +427,17 @@ Real issues hit during development, and their actual fixes -- not hypothetical s
 | `?token=...` disappears after visiting `/fax` (no trailing slash) | `return 301 /fax/;` drops the query string on redirect | Use `return 301 /fax/$is_args$args;` |
 | Dashboard shows demo data even with a token in the URL | Browser cached an earlier (broken) redirect | Hard refresh, or test in a private/incognito window |
 | `INVALID_GATEWAY` on originate | Dial string used the friendly gateway name instead of `gateway_uuid` | Use `gateway_uuid` from `v_gateways`, not `gateway` (see 7.1) |
-| `INVALID_GATEWAY` even with a correct-looking gateway name | Gateway exists in the DB but RingQ hasn't loaded it live | `fs_cli -x "sofia profile external rescan"`, then re-check `sofia status gateway` |
+| `INVALID_GATEWAY` even with a correct-looking gateway name | Gateway exists in the DB but FreeSWITCH hasn't loaded it live | `fs_cli -x "sofia profile external rescan"`, then re-check `sofia status gateway` |
 | `Parse Error` on originate, immediate `DESTINATION_OUT_OF_ORDER` | Unquoted space in `fax_header`/`fax_ident` broke the `{key=value,...}` parser | Wrap any value containing a space/comma in single quotes before building the dial string |
 | `CHAN_NOT_IMPLEMENTED` | Misleading error -- usually still a bad/unregistered gateway reference, not a missing module | Confirm `mod_sofia` is loaded, then re-check the exact gateway UUID being dialed |
 | Outbound fails instantly with `"Timed out waiting for initial communication"`, but manual `fs_cli originate` to the same gateway also fails | No matching Outbound Rule (Caller ID authorization) for this number | Create an Outbound Rule with this number as Caller ID -- see 7.2 |
-| Inbound: real page received (confirmed on disk / in RingQ log), but nothing shows up in `GET /fax/jobs` or the Inbox | `domain_uuid` was never set on the channel before the fax actions ran | Add `set(domain_uuid=<value>)` explicitly to that number's dialplan -- see 7.3 rule 1 |
-| Dialplan edit confirmed correct in Postgres, but live calls still show the old behavior -- even after `reloadxml` **and** a full `systemctl restart RingQ` | Editing an existing `v_dialplans` row's `dialplan_xml` in place is unreliable on this platform | Disable the old row, insert a fresh one with a brand-new UUID -- see 7.3 rule 3 |
+| Inbound: real page received (confirmed on disk / in FreeSWITCH log), but nothing shows up in `GET /fax/jobs` or the Inbox | `domain_uuid` was never set on the channel before the fax actions ran | Add `set(domain_uuid=<value>)` explicitly to that number's dialplan -- see 7.3 rule 1 |
+| Dialplan edit confirmed correct in Postgres, but live calls still show the old behavior -- even after `reloadxml` **and** a full `systemctl restart freeswitch` | Editing an existing `v_dialplans` row's `dialplan_xml` in place is unreliable on this platform | Disable the old row, insert a fresh one with a brand-new UUID -- see 7.3 rule 3 |
 | A previously-working number's dialplan reverts to a generic voice/voicemail flow | RingQ's own DID-assignment UI was touched again for that number, regenerating its own row | Check for a duplicate `v_dialplans` row for that number; disable whichever one isn't yours -- see 7.3 rule 4 |
-| Outbound fax connects, `T38 status negotiated`, then fails with `0 pages` after ~30-40s | Real `mod_spandsp` bug on this RingQ build -- stalls after successful T.38 negotiation | Set `fax_enable_t38=false` -- see Section 11 |
-| Inbound fails instantly whenever the sending machine has T.38 enabled | That specific machine demands T.38 in the very first SDP answer; RingQ won't offer it that early by default | Disable T.38 on the sending machine -- architectural mismatch, not fixable via our settings (Section 11) |
-| `ConnectionRefusedError` / worker log goes quiet after a RingQ restart | Expected -- ESL connection drops when RingQ restarts | Confirm the worker logs `"ESL connection lost -- attempting to reconnect"` followed by a successful reconnect; this is the built-in recovery working correctly, not a failure |
+| Inbound fax "not received" despite a confirmed-correct dialplan entry for the DID | The extension that DID transfers to has voicemail enabled -- the call gets answered by voicemail before fax handling is reached | Disable voicemail on the target extension -- see 7.3 rule 5 |
+| Outbound fax connects, `T38 status negotiated`, then fails with `0 pages` after ~30-40s | Real `mod_spandsp` bug on this FreeSWITCH build -- stalls after successful T.38 negotiation | Set `fax_enable_t38=false` -- see Section 11 |
+| Inbound fails instantly whenever the sending machine has T.38 enabled | That specific machine demands T.38 in the very first SDP answer; FreeSWITCH won't offer it that early by default | Disable T.38 on the sending machine -- architectural mismatch, not fixable via our settings (Section 11) |
+| `ConnectionRefusedError` / worker log goes quiet after a FreeSWITCH restart | Expected -- ESL connection drops when FreeSWITCH restarts | Confirm the worker logs `"ESL connection lost -- attempting to reconnect"` followed by a successful reconnect; this is the built-in recovery working correctly, not a failure |
 | `ECM status off` / `T38 status off` shown even on a **successful** fax | These fields report what was actually negotiated for that specific call, not the configured setting | Not a bug -- ECM/T.38 are optional and mutually negotiated; a successful fax can complete with either or both off if the far end didn't request them |
 
 ---
